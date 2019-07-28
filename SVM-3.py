@@ -59,33 +59,17 @@ def train_these_features(tf, do_svm_grid_search):
     global total_data
     global class_labels
     global expected_data_size
-    global use_agnostic_triggers 
 
     for c, uc in enumerate(useful_channels):                                    # create classifier for each channel
         channel_name = str(uc[1])
         total_data = []
         class_labels = []
-        # if use_agnostic_triggers and (uc[1] == 'OT16'):
-        #     labeled_triggers_path   = "D:\\labeled_data\\labeled_triggers\\agnostic_triggers\\"
-        # elif uc[1] == 'PDB11':
-        #     if use_fft:
-        #         labeled_triggers_path   = "D:\\labeled_data\\labeled_triggers\\fft\\"
-        #     else:
-        #         labeled_triggers_path   = "D:\\labeled_data\\labeled_triggers\\" + "optimized\\"
-        #         #labeled_triggers_path   = "D:\\labeled_data\\labeled_triggers\\unsorted\\"
-        #     use_agnostic_triggers += 1 #ot16 should use AT, pdb11 should not
-        # else:
-        #     labeled_triggers_path   = "D:\\labeled_data\\labeled_triggers\\" + "optimized\\"
-        
-        optimized_mseed_class_path = labeled_data_path
+        optimized_mseed_class_path = labeled_data_path 
 
-        if use_agnostic_triggers:
-            optimized_mseed_class_path += "agnostic_triggers\\"
-
-        ert_stream_path      = optimized_mseed_class_path + 'ert\\*.mseed'
-        drilling_stream_path = optimized_mseed_class_path + 'drilling\\*.mseed'
-        cassm_stream_path    = optimized_mseed_class_path + 'cassm\\*.mseed'
-        meq_stream_path      = optimized_mseed_class_path + 'meq\\*.mseed'
+        ert_stream_path      = optimized_mseed_class_path + 'ert_training\\*.mseed'
+        drilling_stream_path = optimized_mseed_class_path + 'drilling_training\\*.mseed'
+        cassm_stream_path    = optimized_mseed_class_path + 'cassm_training\\*.mseed'
+        meq_stream_path      = optimized_mseed_class_path + 'meq_training\\*.mseed'
 
         build_data_set(cassm_stream_path,    max_stream_count, tf)              # Run through directories of optimized .mseed files and
         build_data_set(drilling_stream_path, max_stream_count, tf)              # append traces to total_data and class type to class_labels 
@@ -230,15 +214,14 @@ def model_evaluate(X_train, X_test, y_train, y_test, classifier, training_featur
 
 def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify_cnt, model_name, classes):
     
-    total_class_predictions        = np.zeros(shape=(len(classes), len(useful_channels),  3))     # Performance of all classes for each channel (3D list)
-    total_class_misclassifications = np.zeros(shape=(len(classes), len(useful_channels),  4))     # Distribution of misclassified .mseeds for each class
+    total_class_predictions        = np.zeros(shape=(len(classes),  3))                       # Performance of all classes correct, maybe correct, misclassified count
+    total_class_misclassifications = np.zeros(shape=(len(classes), shape=(len(classes))))     # Distribution of misclassified .mseeds for each class
 
     for class_index, class_type in enumerate(classes):
-            total_class_mseeds_considered    = 0
             skipped_mseeds                   = 0
 
             class_misclassifications = np.zeros(shape=(len(useful_channels), len(classes)))
-            
+            #class_predictions        = np.zeros(shape=(len(classes), 3))
             optimized_mseed_class_path = D_class_labeled_data_path
             optimized_mseed_class_path += class_type + "_validation\\*.mseed"
             
@@ -250,11 +233,13 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
 
             num_class_mseeds = max_classify_cnt if (len(all_class_mseeds) > max_classify_cnt) else len(all_class_mseeds)
             
-            print("Performing mass " + class_type.upper() + " .mseed classification on %d streams. " % num_class_mseeds)
+            print("Performing mass " + class_type.upper() + " .mseed classification on %d streams from %s. " % (num_class_mseeds, optimized_mseed_class_path))
             for mseed in trange(num_class_mseeds, leave=True):
                 timestamp = re.search('[0-9]+(\.[0-9][0-9]?)?', all_class_mseeds[mseed]).group(0)   # extracts timestamp from file name
+                mseed_pred          = np.zeros(3, dtype=np.int32)                                   # single mseed prediction result [correct, maybe correct, misclassified count]
+                which_wrong_class   = np.zeros(shape=(len(classes)))                                # specifies which was the wrong class prediction
+                model_path = "{0}-{1}".format(classifier_location, model_name)
                 unlabeled_mseed_path = unlabeled_triggers_path + timestamp + ".mseed"
-
                 try:
                         st = read(unlabeled_mseed_path)
                 except Exception as e:
@@ -262,9 +247,6 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
                         #print("Could not read stream at " + str(unlabeled_mseed_path) + "[" + str(e) + "]")
                         continue
 
-                mseed_pred          = np.zeros(3, dtype=np.int32) # single mseed prediction result [correct, maybe correct, misclassified count]
-                which_wrong_class   = np.zeros(shape=(len(classes)))                         # 
-                model_path = "{0}-{1}".format(classifier_location, model_name)
                 predictions = svm_classify_stream(st, model_path, class_type=-1)
 
                 if (predictions[0][0] == class_type.upper()) and \
@@ -277,36 +259,18 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
                 else:                                                       # Misclassified or timidly confident
                     mseed_pred[2] += 1
                     class_key = class_dict.get(predictions[0][0])
-                    which_wrong_class[class_key] += 1
+                    class_misclassifications[class_key] += 1
 
-                class_misclassifications += which_wrong_class
-                for channel, uc in enumerate(useful_channels):
-                    channel_name = str(uc[1])
-                    channel_pred = np.zeros(3, dtype=np.int32)                  # Correct, maybe correct, misclassified counts
-                    #class_channel_misclassifications = np.zeros(len(useful_channels), type=np.int32)
-                    channel_misclassified = np.zeros(len(classes))              # Distribution of misclassifications for each channel
-                    model_path = "{0}-{2}".format(classifier_location, channel_name, model_name)
+            total_class_misclassifications[class_index] = class_misclassifications
+            total_class_predictions[class_index]        = mseed_pred
 
-                    if plot_wiggles:
-                        st[uc[0]].plot(method='full')
-                        #st[54].plot(method='full')
-
-                    #print("Mass classification using channel " + channel_name)
-                                                                                # If correct prediction & made with enough confidence
-
-
-                    class_channel_misclassifications[channel] += channel_misclassified
-                    class_channel_predictions[channel]        += channel_pred
-                #print(class_channel_predictions)
-            total_channel_predictions[class_index]          = class_channel_predictions
-            total_channel_misclassifications[class_index]   = class_channel_misclassifications
-    stdoutOrigin = sys.stdout
-    sys.stdout = open(model_performance_path, "a+")
-    print("\n((***************))\nModel performance on [%s]" % model_path)
-    print_classification_matrix(total_channel_predictions, classes)
-    print_misclassification_breakdown(total_channel_misclassifications)
-    sys.stdout.close()
-    sys.stdout = stdoutOrigin
+        stdoutOrigin = sys.stdout
+        sys.stdout = open(model_performance_path, "a+")
+        print("\n((*************** | ((***************))\nModel performance on [%s]" % model_path)
+        print_classification_matrix(total_class_predictions, classes)
+        print_misclassification_breakdown(total_class_misclassifications)
+        sys.stdout.close()
+        sys.stdout = stdoutOrigin
 
 # Given a stream, return list of tuples with probabilities for each class
 def svm_classify_stream(stream, best_classifier_location, class_type):
@@ -320,7 +284,6 @@ def svm_classify_stream(stream, best_classifier_location, class_type):
         data_to_predict  = process_stream_to_pca(stream, tf, useful_channel_indices, class_type).flatten()
 
         return svm_predict(data_to_predict.reshape(1, -1), model, channel_name)
-
 
 # PCA parameters are extracted from the classifier's file name
 # e.g. from "SVM-Classifier(500)_449_2_900_200" returns 449, 2, 900, 200 (skips max stream count)
@@ -388,7 +351,6 @@ def svm_predict(data_to_predict, model):
 
     return sorted(predictions,key=lambda x: x[1], reverse=True)             # return class probabilities in descending order
 
-
 # Given an .mseed timestamp and its class, check to see whether this .mseed 
 # exists in a directory (likely one used for training) to classify on novel data
 def check_mseed_existence(timestamp, mseed_dir):
@@ -421,74 +383,66 @@ def transform3Dto2D(np_array_3D):
                 array_2D.append(new_row)
         return np.array(array_2D).tolist()
 
-# Utility function to cleanly print out misclassified distribution of a class
-def print_misclassification_breakdown(total_channel_misclassifications):
-    for cl, class_breakdown in enumerate(total_channel_misclassifications):
+# Utility function to cleanly print out misclassified distribution of a class in ascending order
+def print_misclassification_breakdown(total_class_misclassifications):
+    for cl, class_breakdown in enumerate(total_class_misclassifications):
         class_label = find_class_label_from_value(cl, single_class=1)
         print("\n%s misclassification breakdown" % class_label, end="")
+        total_misclassified = sum(class_breakdown)
+        class_misclassifications = []
+        for wc, wrong_class in enumerate(class_breakdown):
+            wrong_class_label = find_class_label_from_value(wc, single_class=1)
+            if total_misclassified == 0:
+                wrong_class_proportion = 0
+            else:
+                wrong_class_proportion = 100 * wrong_class / total_misclassified
+            wrong_class_tuple = (wrong_class_label, wrong_class_proportion)
+            class_misclassifications.append(wrong_class_tuple)
 
-        for ch, channel_breakdown in enumerate(class_breakdown):
-            print("\n\t%6s" % useful_channels[ch][1], end=") ")
-            total_misclassified = sum(channel_breakdown)
-            channel_misclassifications = []
-            for wc, wrong_class in enumerate(channel_breakdown):
-                wrong_class_label = find_class_label_from_value(wc, single_class=1)
-                if total_misclassified == 0:
-                    wrong_class_proportion = 0
-                else:
-                    wrong_class_proportion = 100 * wrong_class / total_misclassified
-                wrong_class_tuple = (wrong_class_label, wrong_class_proportion)
-                channel_misclassifications.append(wrong_class_tuple)
+        class_misclassifications.sort(key=lambda x: x[1])
+        for cm in class_misclassifications:
+            print("{:>8s}: {:02.02f}%".format(cm[0], cm[1]), end=" ")
 
-            channel_misclassifications.sort(key=lambda x: x[1])
-            for cm in channel_misclassifications:
-                #print("%8s: %02.01f%%" % (wrong_class_label, 100*(wrong_class/total_misclassified)), end=" ")
-                print("{:>8s}: {:02.02f}%".format(cm[0], cm[1]), end=" ")
-
-def print_classification_matrix(total_channel_predictions, classes):
+# Cleanly prints contents of a 4 x (1 x 3) list containing the class prediction (correct, somewhat correct, misclassified)
+# for all classes
+def print_classification_matrix(total_class_predictions, classes):
         print("\t   ", end="")
         for ch, channel in enumerate(useful_channels):
-            print("%12s" % channel[1].ljust(6), end="")
+            print("%6s" % channel[1].ljust(6), end=" + ")
         print("       Total   Acceptability", end="\n\t  ")
         for uc in range(len(useful_channels)+1):
             print("-----------------", end="")
         print("")
         #print("".join(["--------------" for uc in range(useful_channels+1)]))
-        for cp, class_prediction in enumerate(total_channel_predictions):
+        for cp, class_prediction in enumerate(total_class_predictions):
             title_stream = "{:9s}".format(classes[cp].rjust(9).upper())
             print(title_stream, end="[")
-            for c, channel_prediction in enumerate(class_prediction):
-                channel_stream = ""
-                for p in channel_prediction:
-                    channel_stream += "%4d " % p
-                if c < len(class_prediction)-1:
-                    print(channel_stream, end="|")
-                else:
-                    print(channel_stream, end="")
-            #print("] Σ=%0*d" % (len(str(max_stream_count)), sum(channel_prediction)), end=" ")
+
+            channel_stream = ""
+            for p in channel_prediction:
+                channel_stream += "%4d " % p
+            else:
+                print(channel_stream, end="")
             print("] E=%0*d" % (len(str(max_stream_count)), sum(channel_prediction)), end=" ")
-            print_class_performance(class_prediction, classes, consider_all_channels=1)
+            print_class_performance(class_prediction, classes)
             print("")
 
 # Returns tuple with size of useful_channels with acceptability scores (sum of
 # correct + kinda_correct predictions) for each channel
-# if consider_all_channels is 0, will only find class scores for appropriate channels
-# ie MEQ and ERT will omit performance for PDB11 (should usually be 1)
-def print_class_performance(class_channel_pred, classes, consider_all_channels):
+def print_class_performance(class_prediction, classes):
     class_scores = []
 
-    for cp, channel_prediction in enumerate(class_channel_pred):
-        stream_count                = sum(channel_prediction)
-        confidently_predicted       = channel_prediction[0]                     # count of valid predictions above arbitrary confidence threshold (usually 70-80%+)
-        kinda_confidently_predicted = channel_prediction[1]                     # valid predictions below ^ and above a different threshold (usually 40-60%)
-        misclassified               = channel_prediction[2]
-        
-        correct_pred_score          = confidently_predicted       / stream_count      # ratios
-        kinda_correct_pred_score    = kinda_confidently_predicted / stream_count
-        misclassified_score         = misclassified               / stream_count
+    stream_count                = sum(class_prediction)
+    confidently_predicted       = class_prediction[0]                     # count of valid predictions above arbitrary confidence threshold (usually 70-80%+)
+    kinda_confidently_predicted = class_prediction[1]                     # valid predictions below ^ and above a different threshold (usually 40-60%)
+    misclassified               = class_prediction[2]
+    
+    correct_pred_score          = confidently_predicted       / stream_count      # ratios
+    kinda_correct_pred_score    = kinda_confidently_predicted / stream_count
+    misclassified_score         = misclassified               / stream_count
 
-        acceptability_score         = correct_pred_score + kinda_correct_pred_score
-        class_scores.append("%.02f" % acceptability_score)
+    acceptability_score         = correct_pred_score + kinda_correct_pred_score
+    class_scores.append("%.02f" % acceptability_score)
 
     print("( ", end="")
     for cs in class_scores:
@@ -553,7 +507,7 @@ def main():
         #stream_path = "D:\\trigger\\1543366796.60.mseed"               # ERT
         #stream_path = "D:\\trigger\\1544203603.19.mseed"
         #stream_path = "D:\\trigger\\1543365081.20.mseed"
-        classify_mseed(stream_path, model_name, num_channels=len(useful_channels))
+        #classify_mseed(stream_path, model_name, num_channels=len(useful_channels))
 
     # TODO: - perform mass classification on all raw triggers, verify using all pngs    
     #       - manually separate training & validation mseeds to find true raw mass class. score
