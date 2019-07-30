@@ -22,13 +22,13 @@ from obspy.signal.invsim import simulate_seismometer, corn_freq_2_paz
 from obspy.io import mseed
 import os
 from tqdm import trange
-from pca import pca_reduce, plot_wiggle, normalize1D
+from pca import pca_reduce, plot_wiggle, normalize1D, project_pca
 import pandas as pd
 from math import floor, sqrt
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import legend
 
-from fourier import do_fft, plot_fft, fft2stream, fft2float64
+#from fourier import do_fft, plot_fft, fft2stream, fft2float64
 import random
 from scipy.signal import find_peaks
 class_dict = {'MEQ' : 0, 'CASSM' : 1, 'DRILLING' : 2, 'ERT' : 3, 'NOISE' : 4}
@@ -40,7 +40,8 @@ labeled_data_path               = "D:\\labeled_data\\optimized_and_labeled_trigg
 error_log_path                  = "C:\\Users\\David\\Desktop\\training_error_log.txt"
 
 # Parameters to specify resulting optimized stream location
-sequentially_load_pngs  = 0
+test_pca                = 0
+sequentially_load_pngs  = 1
 use_agnostic_triggers   = 1
 find_fft                = 0
 
@@ -48,15 +49,43 @@ class_wiggles_chopped   = 0
 class_wiggles_saved     = 0
 
 plot_wiggles            = 0
-verif_amt               = -100
+verif_amt               = -200
 verified                = 0
-max_stream_count        = 2444
+max_stream_count        = 2000
 #useful_channels         = [(10, 'PDB11'), (54, 'OT16')]
-useful_channels         = [(10, 'PDB11')] # TODO: optimize general trigger detection for PDB?
+useful_channels         = [(2, 'PDB03')]
+#useful_channels         += [(10, 'PDB11')] # TODO: optimize general trigger detection for PDB?
 useful_channels         += [(54, 'OT16')]
-
+#useful_channels         += [(55, 'OT17')]
 std_on                  = -1
 std_off                 = -1
+
+OT16_pcas = []
+PDB11_pcas = []
+
+# TODO: truly optimize standard trigger finder
+
+def main():
+    global verified
+    global class_wiggles_chopped 
+    global class_wiggles_saved
+
+    #classes = ['ert','cassm','meq', 'cassm', 'drilling', 'ert']
+    classes = ['meq', 'cassm', 'drilling', 'ert']
+    #classes = ['drilling']
+    for class_type in classes:
+        print("Optimizing " + class_type.upper() + " .mseed files.")
+        optimize_class(class_type)
+        print("chopped %d out of %d traces from %s" % (class_wiggles_chopped, class_wiggles_saved, class_type))
+        verified = 0
+        class_wiggles_chopped = 0
+        class_wiggles_saved = 0
+    #a_arr = np.array(OT16_pcas)
+    #h_arr = np.array(PDB11_pcas)
+
+    #print(a_arr.shape)
+    #project_pca(a_arr)
+    #project_pca(np.array(PDB11_pcas))
 
 # Returns location of one or more triggers for a supplied .mseed or .dat wiggle.
 # For labelling purposes, the class_type is used to apply proper filtering & 
@@ -67,29 +96,26 @@ def return_trigger_index(wiggle, channel_name, class_type):
     trigger_indices = []
     index_depth = 0.3                                                           # how far into max indices to return possible trigger
                                                                                 # (avoids returning triggers at very beginning)
-    sta     = 1
-    lta     = 1
+    global OT16_pcas
+    global PDB11_pcas
+
     on      = 1
     off     = 1
-    max_triggers = 25
-    max_trigger_length = 20000                                                  # "Maximum length of triggered event in samples.
                                                                                 # A new event will be triggered as soon as the signal reaches again above thres1."
-    if channel_name == 'PDB11':                                                 # Hydrophone 
+    if "PDB" in channel_name:                                                 # Hydrophone 
         if (class_type == -1):
             trigger_indices, ctf = standard_trigger_finder(trace, channel_name)
             on = std_on
             off = std_off
-    elif channel_name == 'OT16':
+    elif "OT" in channel_name:                                                  # Accelerometer
         if (class_type == -1):
             #trace.filter('bandpass', freqmin=1000, freqmax=15000)
-            sta = 20
-            lta = 60
             trigger_indices, ctf = standard_trigger_finder(trace, channel_name)
             on = std_on
             off = std_off
 
     trigger_data = np.zeros(1, dtype=np.int32)
-    depth_threshold = 0.03                                                   # triggers at indices sooner than this will not be used
+    depth_threshold = 0.05                                                   # triggers at indices sooner than this will not be used
     trigger_index = floor(index_depth * len(trigger_indices))                  # just in case all triggers are very early
     for trigger_pair in trigger_indices:
         if not ( (trigger_pair[0]/len(ctf)) < depth_threshold ):
@@ -98,151 +124,104 @@ def return_trigger_index(wiggle, channel_name, class_type):
 
     trigger_data[0] = trigger_index
 
+    trigger_stream = Stream([Trace(data=trigger_data)])
     if (verified < verif_amt):
-        plot_trigger(trace, ctf, on, off)
+        t = trace.copy()
+        t.data = t.data[300:]
+        plot_trigger(t, ctf, on, off)
         verified += 1
 
-        for t, trigger in enumerate(trigger_data):
-            #--- testing pca ---
-            trigger_offset  = 300
-            window_size     = 1300
-            block_size      = 2
-            pca_n_pts       = floor(window_size/block_size) - 1                     
-            trigger_start = trigger# trigger_start_index[0].data[0]                         
-
-            #print("Suspected trigger start: %s depth: %.03f%% in %d" % (str(trigger_start), 100*(trigger_start / ot16_npts), ot16_npts))
-            trace_start = (trigger_start - trigger_offset) if ((trigger_start - trigger_offset) > 0) else 0
-            trace_end = trace_start + window_size
-
-            last_data_pt = trace[len(trace)-1]
-            trace_window    = []
-            if (len(trace) < trace_end):
-                trace_window = np.pad(trace[trace_start:len(trace)],
-                                     (0, (trace_end - len(trace))),
-                                     'constant', constant_values=last_data_pt)
-            else:
-                trace_window = trace[trace_start:trace_end]
-
-            pca, pca_wiggle, reconstructed_wiggle = pca_reduce(trace_window, pca_n_pts, block_size)
-            if plot_wiggles:
-                plot_wiggle(pca_wiggle)
-                continue
-
-            #plot_wiggle(reconstructed_wiggle)
-
-            #--- testing pca ---
-
-    trigger_stream = Stream([Trace(data=trigger_data)])
     return trigger_stream
-
-# deprecated . . . 
-def remove_cassm_spike(trace):
-    t = trace.copy()
-    window_length = 300
-    window_start = 0
-    window_end = window_start + window_length
-    jump_amt = 50
-    spike_threshold = 0.04
-
-    for j in range(0, floor(len(t) / window_length)):
-        w = t[window_start:window_end]
-        nw = normalize1D(w)
-        window_smoothness = np.std(nw)
-        if (window_smoothness > spike_threshold):
-            #t_plot = plt.plot(w, color='#95a172')
-            #plt.show()
-            return trace[:window_start]
-
-        window_start += jump_amt
-        window_end = window_start + window_length
-    return trace
 
 # given a trace with a drastic spike towards the end, return truncated trace without this tail
 # (used almost exclusively by CASSM wiggles)
 def trace_tail_chopper(trace):
     global class_wiggles_chopped
     t = trace.copy()
-    max_n_pts = 30
-    spine_length = 500                                                          # in cassm, spikes happen after trace values are close to 0 out for some time
-    tail_spike_length = 200
-    spine_smoothness_threshold = 0.040                                          # points just before tail begins should be very smooth for cassm spike
-    tail_spikiness_threshold = 0.02
-    tail_start_depth = 0.45                                                     #tails always start towards end of trace
+    max_n_pts                   = 30
+    spine_length                = 500                                                          # in cassm, spikes happen after trace values are close to 0 out for some time
+    tail_spike_length           = 200
+    spine_smoothness_threshold  = 0.045                                          # points just before tail begins should be very smooth for cassm spike
+    tail_spikiness_threshold    = 0.03
+    tail_start_depth = 0.55                                                     #tails always start towards end of trace
     suspected_tail_start = floor(tail_start_depth * len(t))
     tail_start_buffer = 180                                                      # don't want trace to end RIGHT at the start of tail
-    
+    max_peaks_to_consider       = 6
+    peaks_considered            = 0
     extreme_indices = []
     extreme_indices.append(find_index_of_min_val(t[suspected_tail_start:], max_n_pts)[0] + suspected_tail_start)
     extreme_indices.append(find_index_of_max_val(t[suspected_tail_start:], max_n_pts)[0] + suspected_tail_start)
     
     normalized_tail = abs(normalize1D(t[suspected_tail_start:]))
-    peaks,_ = find_peaks(normalized_tail, height=None, threshold=None, distance=None, prominence=0.02, width=None)
+    peaks,_ = find_peaks(normalized_tail, height=(0.01), threshold=None, distance=None, prominence=0.01, width=None)
     
     if (plot_wiggles):
-        plt.plot(peaks, normalized_tail[peaks], "ob")
-        plt.plot(normalized_tail)
-        plt.show()
+        pass
+        #plt.plot(peaks, normalized_tail[peaks], "ob")
+        #plt.plot(normalized_tail)
+        #plt.show()
         #plt.legend(['prominence'])
 
     # tail spike may only spike upwards, only downwards, up then down, or down then up
     # so instead, check for peak (whether max or min), if spine behind? tail.
     #for p in extreme_indices:
     for p in peaks:
-        p += suspected_tail_start
-        tail_start = p-tail_start_buffer
-        normalized_spine = normalize1D(t[tail_start-spine_length:tail_start])
-        normalized_tail_spike = normalize1D(t[tail_start:tail_start+tail_spike_length])
-        spine_smoothness = np.std(normalized_spine)
-        tail_spikiness = np.std(normalized_tail_spike)
-        if (plot_wiggles):
-            print("\ntail_start: %d\nspine_std: %0.08f\ntail_std: %.08f" % (p, spine_smoothness, tail_spikiness))
-            plt.style.use('dark_background')
-            t_plot = plt.plot(normalized_tail_spike, color='#95a172')
-            s_splot = plt.plot(normalized_spine, color='#fc8803')
-            #plt.legend((t_plot, s_splot), ('tail', 'spine'))
-            #plt.show()
+        if peaks_considered <= max_peaks_to_consider:
+            p += suspected_tail_start
+            tail_start = p-tail_start_buffer
+            spine_buffer = 250
+            normalized_spine = normalize1D(t[tail_start-spine_length-spine_buffer:tail_start-spine_buffer])
+            normalized_tail_spike = normalize1D(t[tail_start:tail_start+tail_spike_length])
+            spine_smoothness = np.std(normalized_spine)
+            tail_spikiness = np.std(normalized_tail_spike)
+            if (plot_wiggles):
+                print("\ntail_start: %d\nspine_std: %0.08f\ntail_std: %.08f" % (p, spine_smoothness, tail_spikiness))
+                plt.style.use('dark_background')
+                #t_plot = plt.plot(normalized_tail_spike, color='#95a172')
+                #s_splot = plt.plot(normalized_spine, color='#fc8803')
+                #plt.legend((t_plot, s_splot), ('tail', 'spine'))
+                #plt.show()
 
-        if (spine_smoothness < spine_smoothness_threshold) and (tail_spikiness > tail_spikiness_threshold):
-            class_wiggles_chopped += 1
-            #print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
-            return trace[:tail_start]
+            if (spine_smoothness < spine_smoothness_threshold) and (tail_spikiness > tail_spikiness_threshold):
+                class_wiggles_chopped += 1
+                #print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
+                return trace[:tail_start]
+            peaks_considered += 1
     return trace                                                                # else return unaltered trace
-
 
 def standard_trigger_finder(trace, channel_name):
     global std_on
     global std_off
-    max_triggers = 20
+    t = trace.copy()
+    max_triggers = 30    
     max_trigger_length = 20000
-    #ctf_start = 300                                                             # avoids triggering on initial spike
-    if (channel_name == 'PDB11'):
-        trace.filter('highpass', freq=1500)
+    ctf_start = 300                                                             # avoids triggering on initial spike
+    if "PDB" in channel_name:                                                 # Hydrophone 
+        #trace.filter('highpass', freq=1500)
         sta = 20
         lta = 60
-        ctf = recursive_sta_lta(trace.data, sta, lta)
-        #std_on  = ctf[find_index_of_max_val(ctf, max_triggers)] * 0.84
+        ctf = recursive_sta_lta(t.data, sta, lta)
+        ctf = ctf[ctf_start:]
+
         std_on = ctf[find_index_of_best_val(ctf, max_triggers)] * 0.98
 
         std_off = std_on * 0.8
         trigger_indices = trigger_onset(ctf, std_on, std_off, max_trigger_length)
     
-    if (channel_name == 'OT16'):
-        #trace.filter('bandpass', freqmin=1000, freqmax=15000)
+    if "OT" in channel_name:                                                    #TODO: fix this . . .                                                   
+        #t.filter('bandpass', freqmin=1000, freqmax=15000)
         sta = 10
         lta = 50
-        ctf = recursive_sta_lta(trace.data, sta, lta)
-        #ctf = ctf[ctf_start:]
+        ctf = recursive_sta_lta(t.data, sta, lta)
+        ctf = ctf[ctf_start:]
 
-        #std_on  = ctf[find_index_of_max_val(ctf, max_triggers)] * 0.77
-        std_on = ctf[find_index_of_best_val(ctf, max_triggers)] * 0.98
-        std_off = std_on * 0.84
+        #std_on  = ctf[find_index_of_max_val(ctf, max_triggers)] * 0.94
+        std_on = ctf[find_index_of_best_val(ctf, max_triggers)] * 0.92
+        if (std_on < 1):
+            std_on += (1-std_on) * 1.1
+        #print("std_on: " + str(std_on))
+        std_off = 1#std_on * 0.92
         trigger_indices = trigger_onset(ctf, std_on, std_off, max_trigger_length)
-
-        # sta = 20
-        # lta = 60
-        # ctf = recursive_sta_lta(trace.data, sta, lta)
-        # std_on  = ctf[find_index_of_max_val(ctf, max_triggers)] * 0.9
-        # std_off = std_on * 0.8
 
     return trigger_indices, ctf
 
@@ -272,6 +251,7 @@ def find_index_of_best_val(ctf, max_triggers):
     sum_value = 0
     avg_value = 0
     for i in max_indices:
+        #print("truncated_ctf[%d] = %.03f\n" % (i, truncated_ctf[i]))
         sum_value += truncated_ctf[i]
     avg_value = sum_value / max_triggers
 
@@ -285,7 +265,7 @@ def find_index_of_best_val(ctf, max_triggers):
 #    c) class type (using global int32 class_dict mapping)
 def optimize_class(class_type):
     global verified
-    png_path        = labeled_data_png_path + class_type + "\\*.png"
+    png_path = labeled_data_png_path + class_type + "\\*.png"
     
     if sequentially_load_pngs:
         all_class_pngs  = sorted(glob.glob(png_path))
@@ -295,17 +275,15 @@ def optimize_class(class_type):
 
     max_pngs        = max_stream_count if (len(all_class_pngs) > max_stream_count) else len(all_class_pngs)
     class_label     = png_path.split("\\")[png_path.count("\\")-1]              # name of class eg 'ert', 'meq'.. or just use class_type?
-    
+    optimized_class_streams = []
     missed_pngs      = 0                                                        # counter for missing .mseed files
     handle_errors    = 0                                                        # boolean to deal with 'png not found' errors
     error_msg        = []               
-    fft_start        = 50                                                       # hard-coded start index of fft (avoids ubiquitious initial spike)
-    fft_end          = 900                                                      # most useful FFT info. occurs earlier than this
     channel_triggers = np.zeros(len(useful_channels), dtype=np.int32)           # List of detected trigger start locations for each useful_channel (in order)
-    
+    traces_chopped   = 0 
     for png in trange(max_pngs, leave=True):
         useful_traces    = []                                                   # List of traces which are representative of entire stream (at least ot16 and pdb11)
-        useful_ffts      = []                                                   # FFT for each useful channel?
+
         try:
             png_name = all_class_pngs[png]
             timestamp = re.search('[0-9]+(\.[0-9][0-9]?)?', png_name).group(0)  # extracts timestamp from file name
@@ -333,49 +311,81 @@ def optimize_class(class_type):
 
             #### Important: this trace preprocessing must be replicated when training / classifying in SVM
             trace_start = 300                                                   # skips this many npts to discard initial spike 
-            t.filter('lowpass', freq=8000)
+            if 'OT' in channel_name:
+                t.filter('lowpass', freq=6000)
+            elif 'PDB' in channel_name:
+                t.filter('lowpass', freq=3000)
             #t.filter('highpass', freq=800)
             t.data = t.data[trace_start:]
 
-            if plot_wiggles and channel_name == 'OT16':
+            if plot_wiggles and 'OT' in channel_name:
                 t.plot(method='full', equal_scale=True, color='#ccd0ff', bgcolor='#07012b', linewidth='1.2', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
-                nt = normalize1D(t.data)
-                plt.plot(nt)
-                plt.show()
-            if channel_name == 'OT16':# and class_label == 'CASSM':               # cassm tails do not exist in PDB11
+                #nt = normalize1D(t.data)
+                #plt.plot(nt)
+                #plt.show()
+
+            if 'OT' in channel_name:
+
+            #if 'OT' in channel_name and channel_name == 'cassm':
                 #print(t.stats.npts)
                 npts_b4 = t.stats.npts
                 t.data = trace_tail_chopper(t.data)
                 #t.data = remove_cassm_spike(t.data)
                 npts_after = t.stats.npts
                 #print(t.stats.npts)
-                if npts_b4 != npts_after:
-                    t.detrend(type='linear')
+                if npts_b4 != npts_after:# chopped!
+                    traces_chopped += 1
+                    #t.detrend(type='linear')
 
-            if plot_wiggles and channel_name == 'OT16':
+            if plot_wiggles and 'OT' in channel_name:
                 t.plot(method='full', equal_scale=True, color='#26de4e', bgcolor='#07012b', linewidth='1.0', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
 
-            if find_fft:
-                if channel_name == 'OT16':                                      #find fft for OT16
-                    filtered_wiggle = t.copy()
-                    filtered_wiggle.filter('lowpass', freq=10000)
-                    trace_fft = do_fft(filtered_wiggle) 
-                    trace_fft = trace_fft[fft_start:fft_end]
-                    fft_float64 = fft2float64(trace_fft)
-                    #plot_fft(fft_float64)
-                    
             if use_agnostic_triggers:
                 trigger_stream = return_trigger_index(t, uc[1], -1)             # use agnostic trigger detection (generalized for all classes to better reflect classifying scenario)
             else:
                 trigger_stream = return_trigger_index(t, uc[1], class_dict.get(class_type.upper())) # use true class for optimal training
 
+
+                # for t, trigger in enumerate(trigger_data):
+                #     plot_wiggle(reconstructed_wiggle)
+
+            if test_pca:
+                #--- testing pca ---
+                trigger_offset  = 100
+                window_size     = 1200
+                block_size      = 2
+                pca_n_pts       = floor(window_size/block_size) - 1                     
+                trigger_start = trigger_stream[0].data[0]# trigger_start_index[0].data[0]                         
+
+                #print("Suspected trigger start: %s depth: %.03f%% in %d" % (str(trigger_start), 100*(trigger_start / ot16_npts), ot16_npts))
+                trace_start = (trigger_start - trigger_offset) if ((trigger_start - trigger_offset) > 0) else 0
+                trace_end = trace_start + window_size
+
+                last_data_pt = t[len(t)-1]
+                trace_window    = []
+                if (len(t) < trace_end):
+                    trace_window = np.pad(t[trace_start:len(t)],
+                                        (0, (trace_end - len(t))),
+                                        'constant', constant_values=last_data_pt)
+                else:
+                    trace_window = t[trace_start:trace_end]
+
+                pca, pca_wiggle, reconstructed_wiggle = pca_reduce(trace_window, pca_n_pts, block_size)
+                if channel_name == 'OT16': 
+                    OT16_pcas.append(pca_wiggle)
+                elif channel_name == 'PDB11':
+                    PDB11_pcas.append(pca_wiggle)
+                if plot_wiggles:
+                    plot_wiggle(pca_wiggle)
+                    continue
+
             channel_triggers[c] = trigger_stream[0].data[0]
 
-        if (os.path.isdir(optimized_mseed_class_path) == 0):                    # make directory if nonexistent
-            try:
-                os.makedirs(optimized_mseed_class_path)
-            except OSError:
-                error_msg.append("Could not create directory " + optimized_mseed_class_path + " [" + str(e) + "]")
+        # if (os.path.isdir(optimized_mseed_class_path) == 0):                    # make directory if nonexistent
+        #     try:
+        #         os.makedirs(optimized_mseed_class_path)
+        #     except OSError:
+        #         error_msg.append("Could not create directory " + optimized_mseed_class_path + " [" + str(e) + "]")
                 
         # *********************** Saving optimized stream **********************
         try:
@@ -386,17 +396,48 @@ def optimize_class(class_type):
                     #ut.plot(method='full', color='#0798a8', size=(2000,920))
                     #verified += 1
                     pass
-            # fft for each channel? 
-            if find_fft:
-                optimized_stream.append(fft2stream(trace_fft, st[0])[0])            
 
             optimized_stream.append(list2stream(channel_triggers,st[0])[0])
             optimized_stream.append(class_label_stream[0])
+            optimized_class_streams.append((optimized_stream, timestamp))
+
             optimized_stream.write(optimized_and_labeled_mseed_path, format='MSEED')
+
             class_wiggles_saved += 1
             #found_mseeds += 1
         except Exception as e:
             error_msg.append('Failed to save: ' + optimized_and_labeled_mseed_path + " [" + str(e) +"]")
+
+
+    data_split = [0.65, 0.35] # proportions of testing & validation data resp.
+    max_training_size = floor(len(optimized_class_streams) * data_split[0])
+    random.shuffle(optimized_class_streams)
+    print("Chopped %d traces" % traces_chopped)
+    print("Splitting %d data into %.02f, %.02f testing/validation split." % (len(optimized_class_streams), data_split[0], data_split[1]))
+    training_dir = "D:\\labeled_data\\optimized_and_labeled_triggers\\training_mseeds\\%s_training\\" % class_type
+    testing_dir  = "D:\\labeled_data\\optimized_and_labeled_triggers\\validation_mseeds\\%s_testing\\" % class_type
+    training_data = [] # counter
+    if (os.path.isdir(training_dir) == 0):                    # make directory if nonexistent
+        try:
+            print("making dir " + training_dir)
+            os.makedirs(training_dir)
+        except Exception as e:
+            print("could not make directory [%s]" % (e))
+    if (os.path.isdir(testing_dir) == 0):                    # make directory if nonexistent
+        try:
+            os.makedirs(testing_dir)
+        except Exception as e:
+            print("could not make directory [%s]" % (e))
+
+    for ocs in optimized_class_streams: #
+        optimized_and_labeled_mseed_path = training_dir + '\\' + ocs[1] + '-L.mseed'
+        if (len(training_data) < max_training_size):
+            ocs[0].write(optimized_and_labeled_mseed_path, format='MSEED')
+            training_data.append(0)
+        else:
+            optimized_and_labeled_mseed_path = testing_dir + '\\' + ocs[1] + '-L.mseed'
+            ocs[0].write(optimized_and_labeled_mseed_path, format='MSEED')
+        
 
     if (handle_errors):
         for msg in error_msg:
@@ -439,21 +480,6 @@ def list2stream(list2convert, sample_trace):
     }
 
     return Stream([Trace(data=list2convert, header=stats)])
-
-def main():
-    global verified
-    global class_wiggles_chopped 
-    global class_wiggles_saved
-
-    classes = ['cassm','drilling','ert','meq']
-    #classes = ['drilling']
-    for class_type in classes:
-        print("Optimizing " + class_type.upper() + " .mseed files.")
-        optimize_class(class_type)
-        print("chopped %d out of %d traces from %s" % (class_wiggles_chopped, class_wiggles_saved, class_type))
-        verified = 0
-        class_wiggles_chopped = 0
-        class_wiggles_saved = 0
 
 if __name__ == '__main__':
     main()
