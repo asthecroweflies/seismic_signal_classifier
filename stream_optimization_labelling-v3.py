@@ -25,12 +25,16 @@ from tqdm import trange
 from pca import pca_reduce, plot_wiggle, normalize1D, project_pca
 import pandas as pd
 from math import floor, sqrt
+import matplotlib as mpl
+mpl.rcParams.update(mpl.rcParamsDefault)
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import legend
 
 #from fourier import do_fft, plot_fft, fft2stream, fft2float64
 import random
 from scipy.signal import find_peaks
+from pylab import rc, rcParams
+
 class_dict = {'MEQ' : 0, 'CASSM' : 1, 'DRILLING' : 2, 'ERT' : 3, 'NOISE' : 4}
 OVERWRITE = 1
 
@@ -40,30 +44,30 @@ labeled_data_path               = "D:\\labeled_data\\optimized_and_labeled_trigg
 error_log_path                  = "C:\\Users\\David\\Desktop\\training_error_log.txt"
 
 # Parameters to specify resulting optimized stream location
-test_pca                = 0
-sequentially_load_pngs  = 1
-use_agnostic_triggers   = 1
-find_fft                = 0
+test_pca                = 1                                                     # whether to plot pca-ified wiggles
+sequentially_load_pngs  = 1                                                     # whether to sequentially load from pngs
+use_agnostic_triggers   = 1                                                     # whether to use generalized trigger detection (v3 will always)
+actually_optimize_mseed = 0                                                     # for debugging purposes. . .
+
+plot_wiggles            = 1                                                  
+trigger_verif_amt       = 20                                                    # how many plot_triggers to manually inspect
+triggers_verified       = 0         
+max_stream_count        = 5119                                                    # max .mseeds to load from class (useful model identifier)
 
 class_wiggles_chopped   = 0
 class_wiggles_saved     = 0
 
-plot_wiggles            = 0
-verif_amt               = -200
-verified                = 0
-max_stream_count        = 2000
-#useful_channels         = [(10, 'PDB11'), (54, 'OT16')]
+#useful_channels         = [(10, 'PDB11'), (54, 'OT16'), (55, 'OT17')]
 useful_channels         = [(2, 'PDB03')]
-#useful_channels         += [(10, 'PDB11')] # TODO: optimize general trigger detection for PDB?
 useful_channels         += [(54, 'OT16')]
-#useful_channels         += [(55, 'OT17')]
+useful_channels         += [(55, 'OT17')]
+
 std_on                  = -1
 std_off                 = -1
 
-OT16_pcas = []
+# for pca decomp
+OT16_pcas  = []
 PDB11_pcas = []
-
-# TODO: truly optimize standard trigger finder
 
 def main():
     global verified
@@ -71,7 +75,7 @@ def main():
     global class_wiggles_saved
 
     #classes = ['ert','cassm','meq', 'cassm', 'drilling', 'ert']
-    classes = ['meq', 'cassm', 'drilling', 'ert']
+    classes = ['ert','cassm', 'meq','ert', 'meq', 'cassm', 'drilling']
     #classes = ['drilling']
     for class_type in classes:
         print("Optimizing " + class_type.upper() + " .mseed files.")
@@ -91,7 +95,7 @@ def main():
 # For labelling purposes, the class_type is used to apply proper filtering & 
 # sta/lta trigger detection if agnostic_approach is not used. if -1, the generalized approach is used.
 def return_trigger_index(wiggle, channel_name, class_type):
-    global verified
+    global triggers_verified
     trace           = wiggle.copy()
     trigger_indices = []
     index_depth = 0.3                                                           # how far into max indices to return possible trigger
@@ -118,18 +122,18 @@ def return_trigger_index(wiggle, channel_name, class_type):
     depth_threshold = 0.05                                                   # triggers at indices sooner than this will not be used
     trigger_index = floor(index_depth * len(trigger_indices))                  # just in case all triggers are very early
     for trigger_pair in trigger_indices:
-        if not ( (trigger_pair[0]/len(ctf)) < depth_threshold ):
+        if not ( (trigger_pair[0]/len(ctf)) < depth_threshold ) and (trigger_pair[0]/len(ctf) < 0.7 ): # dont return triggers too close to the edge to avoid padding
             trigger_index = trigger_pair[0]
-            break
+            break                                                               # return first best trigger ?
 
     trigger_data[0] = trigger_index
 
     trigger_stream = Stream([Trace(data=trigger_data)])
-    if (verified < verif_amt):
+    if (triggers_verified < trigger_verif_amt):
         t = trace.copy()
         t.data = t.data[300:]
         plot_trigger(t, ctf, on, off)
-        verified += 1
+        triggers_verified += 1
 
     return trigger_stream
 
@@ -176,7 +180,7 @@ def trace_tail_chopper(trace):
             tail_spikiness = np.std(normalized_tail_spike)
             if (plot_wiggles):
                 print("\ntail_start: %d\nspine_std: %0.08f\ntail_std: %.08f" % (p, spine_smoothness, tail_spikiness))
-                plt.style.use('dark_background')
+                #plt.style.use('dark_background')
                 #t_plot = plt.plot(normalized_tail_spike, color='#95a172')
                 #s_splot = plt.plot(normalized_spine, color='#fc8803')
                 #plt.legend((t_plot, s_splot), ('tail', 'spine'))
@@ -184,7 +188,7 @@ def trace_tail_chopper(trace):
 
             if (spine_smoothness < spine_smoothness_threshold) and (tail_spikiness > tail_spikiness_threshold):
                 class_wiggles_chopped += 1
-                #print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
+                print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
                 return trace[:tail_start]
             peaks_considered += 1
     return trace                                                                # else return unaltered trace
@@ -244,7 +248,7 @@ def find_index_of_min_val(wiggle, max_n_pts):
 def find_index_of_best_val(ctf, max_triggers):
     ctf_start = 200
     truncated_ctf = ctf[ctf_start:] # removes starting spike that is apparent in nearly all characteristic fxn's
-    plt.style.use('dark_background')
+    #plt.style.use('dark_background')
     #plt.plot(truncated_ctf, color='#ccd0ff')
     #plt.show()
     max_indices = truncated_ctf.argsort()[-max_triggers:][::-1]
@@ -291,7 +295,8 @@ def optimize_class(class_type):
             error_msg.append("Could not find PNG [" + str(e) + "]")
             missed_pngs +=1
         try:
-            st = read(unlabeled_mseed_path + timestamp + ".mseed")              
+            st = read(unlabeled_mseed_path + timestamp + ".mseed")    
+            #st.plot(method='full', equal_scale=False, type='relative')          
             class_label_stream = return_class_stream(class_label, st[0])
         except Exception as e:
             error_msg.append("Could not find corresponding .mseed file for "
@@ -318,8 +323,9 @@ def optimize_class(class_type):
             #t.filter('highpass', freq=800)
             t.data = t.data[trace_start:]
 
-            if plot_wiggles and 'OT' in channel_name:
-                t.plot(method='full', equal_scale=True, color='#ccd0ff', bgcolor='#07012b', linewidth='1.2', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
+            #if plot_wiggles and 'OT' in channel_name:
+                #t.plot(type='relative', method='full', equal_scale=True, color='#ccd0ff', bgcolor='#07012b', linewidth='1.32', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
+                
                 #nt = normalize1D(t.data)
                 #plt.plot(nt)
                 #plt.show()
@@ -338,7 +344,8 @@ def optimize_class(class_type):
                     #t.detrend(type='linear')
 
             if plot_wiggles and 'OT' in channel_name:
-                t.plot(method='full', equal_scale=True, color='#26de4e', bgcolor='#07012b', linewidth='1.0', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
+                #t.plot(method='full', equal_scale=True, color='#d49313', bgcolor='#ffffff', linewidth='1.4', dayPlot=False, number_of_ticks=8, size=(1000,400))#size=(2000,920))
+                t.plot(method='full', equal_scale=True, color='#c25b16', bgcolor='#ffffff', linewidth='1.8', dayPlot=False, number_of_ticks=8, size=(1000,400))#size=(2000,920))
 
             if use_agnostic_triggers:
                 trigger_stream = return_trigger_index(t, uc[1], -1)             # use agnostic trigger detection (generalized for all classes to better reflect classifying scenario)
@@ -351,9 +358,9 @@ def optimize_class(class_type):
 
             if test_pca:
                 #--- testing pca ---
-                trigger_offset  = 100
-                window_size     = 1200
-                block_size      = 2
+                trigger_offset  = 200
+                window_size     = 1700
+                block_size      = 8
                 pca_n_pts       = floor(window_size/block_size) - 1                     
                 trigger_start = trigger_stream[0].data[0]# trigger_start_index[0].data[0]                         
 
@@ -371,6 +378,7 @@ def optimize_class(class_type):
                     trace_window = t[trace_start:trace_end]
 
                 pca, pca_wiggle, reconstructed_wiggle = pca_reduce(trace_window, pca_n_pts, block_size)
+                
                 if channel_name == 'OT16': 
                     OT16_pcas.append(pca_wiggle)
                 elif channel_name == 'PDB11':
@@ -381,30 +389,58 @@ def optimize_class(class_type):
 
             channel_triggers[c] = trigger_stream[0].data[0]
 
-        # if (os.path.isdir(optimized_mseed_class_path) == 0):                    # make directory if nonexistent
+        # if (os.path.isdir(optimized_mseed_class_path) == 0):                  # make directory if nonexistent
         #     try:
         #         os.makedirs(optimized_mseed_class_path)
         #     except OSError:
         #         error_msg.append("Could not create directory " + optimized_mseed_class_path + " [" + str(e) + "]")
                 
-        # *********************** Saving optimized stream **********************
+        
         try:
             optimized_stream = Stream()     
             for ut in useful_traces:                                            # order of channels is imperative
-                optimized_stream.append(ut)         
-                if (verified < verif_amt):
-                    #ut.plot(method='full', color='#0798a8', size=(2000,920))
-                    #verified += 1
-                    pass
+                optimized_stream.append(ut)
 
-            optimized_stream.append(list2stream(channel_triggers,st[0])[0])
+                plt.style.use('ggplot')
+                plt.plot(ut, color="#772a05")    
+
+                plt.show()
+                plt.clf()
+                plt.cla()     
+                # if (triggers_verified < trigger_verif_amt):
+                #     #ut.plot(method='full', color='#0798a8', size=(2000,920))
+                #     #triggers_verified += 1
+                #     pass
+            # # PDB03
+            optimized_stream.plot(method='full',
+                                  face_color='white',
+                                  type='relative',
+                                  grid_color='#9c9c9c',
+                                  color='#e89a00',
+                                  bg_color='#ffffff',
+                                  linewidth='1.4',
+                                  number_of_ticks='16'
+                                  )
+            # # OT16Z & OT16X
+            # optimized_stream[1:3].plot(
+            #                       face_color='white',
+            #                       method='full',
+            #                       type='relative',
+            #                       grid_color='#9c9c9c',
+            #                       color='#ba8a04',
+            #                       bg_color='#ffffff',
+            #                       linewidth='1.4',
+            #                       number_of_ticks='16'
+            #                       )
+            
+            #optimized_stream.append(list2stream(channel_triggers,st[0])[0])
             optimized_stream.append(class_label_stream[0])
             optimized_class_streams.append((optimized_stream, timestamp))
-
-            optimized_stream.write(optimized_and_labeled_mseed_path, format='MSEED')
+            if actually_optimize_mseed:
+                optimized_stream.write(optimized_and_labeled_mseed_path, format='MSEED')
 
             class_wiggles_saved += 1
-            #found_mseeds += 1
+
         except Exception as e:
             error_msg.append('Failed to save: ' + optimized_and_labeled_mseed_path + " [" + str(e) +"]")
 
@@ -470,7 +506,6 @@ def return_class_stream(class_key, sample_trace):
     return class_label_stream
 
 def list2stream(list2convert, sample_trace):
-
     stats = {'network': 'SV',
              'station' : 'ALL',
              'channel' : 'XXX',
