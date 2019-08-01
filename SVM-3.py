@@ -79,7 +79,7 @@ import sys
                     b) output matrix deconstructing the breakdown of the misclassified .mseeds for a particular class
 '''
 
-labeled_data_path       = "D:\\labeled_data\\optimized_and_labeled_triggers_three_channels\\"
+labeled_data_path       = "D:\\labeled_data\\optimized_and_labeled_triggers\\"
 classifier_location     = "C:\\Users\\David\\Documents\\SVM\\models\\"
 unlabeled_triggers_path = "D:\\trigger\\"
 model_performance_path  = "C:\\Users\\David\\Documents\\SVM\\model_metrics\\model_performance.txt"
@@ -95,13 +95,13 @@ useful_channels         = [(2, 'PDB03')]
 #useful_channels         += [(10, 'PDB11')] # TODO: optimize general trigger detection for PDB?
 useful_channels         += [(54, 'OT16Z')]
 useful_channels         += [(55, 'OT16X')]
-max_stream_count        = 1300                                                  # max streams to consider for training
+max_stream_count        = 3327                                                  # max streams to consider for training
 total_data              = []                                                    # Contains lists of channels for all streams from all classes
 class_labels            = []
 expected_data_size      = 0
 padding_cnt             = 0
 
-plot_wiggles            = 1                                                     # Debugging: whether to show wiggle plots at each stage
+plot_wiggles            = 0                                                     # Debugging: whether to show wiggle plots at each stage
 sequentially_load_pngs  = 0
 
 def main():
@@ -109,26 +109,26 @@ def main():
     global total_data
     global class_labels
         
-    window_size      = 1200
-    trigger_offset   = 200
+    window_size      = 1700
+    trigger_offset   = 300
     block_size       = 2
     n_cmpts          = floor(window_size / block_size) - 1
 
     # Grid search for PCA params
-    window_sizes     = [900, 1100, 1200, 1300, 1500]
-    block_sizes      = [2, 4, 8]
-    trigger_offsets  = [100,200,300]
+    window_sizes     = [800, 900, 1100, 1200, 1300, 1700]
+    block_sizes      = [2]
+    trigger_offsets  = [50, 100,200,300]
 
-    do_train                = 0
+    do_train                = 1
     do_svm_grid_search      = 0
     iter_pca_params         = 0
     classify_single_mseed   = 0
     mass_mseed_classify     = 1
     
     # Mass .mseed classification params
-    correct_threshold       = 0.68                                              # predictions above this are considered confidently correct
-    mmmeh_threshold         = 0.45                                              # predictions below ^ and above this are ostensibly correct               
-    max_classify_cnt        = 1300                                              # max. amt. of .mseeds to classify per class (subject to avail.)
+    correct_threshold       = 0.70                                              # predictions above this are considered confidently correct
+    mmmeh_threshold         = 0.5                                              # predictions below ^ and above this are ostensibly correct               
+    max_classify_cnt        = 3327                                              # max. amt. of .mseeds to classify per class (subject to avail.)
 
     model_name = "SVM-Classifier(%2d)_%3d_%1d_%2d_%1d" % \
                  (max_stream_count, n_cmpts, block_size, window_size, trigger_offset)
@@ -160,7 +160,7 @@ def main():
             tf = TrainingFeatures(window_size, trigger_offset, block_size)
             train_with_these_features(tf, do_svm_grid_search)
 
-    if classify_single_mseed:
+    elif classify_single_mseed:
         #stream_path = "D:\\trigger\\1543378742.86.mseed"                # CASSM
         #stream_path = "D:\\trigger\\1544197621.54.mseed"               # Drilling
         #stream_path = "D:\\trigger\\1544136427.33.mseed"               # MEQ
@@ -170,8 +170,18 @@ def main():
         classify_mseed(stream_path, model_name)
 
     # Iterates through each useful channel for every class and prints respective model score
-    if (mass_mseed_classify):
-        mass_mseed_classification(correct_threshold, mmmeh_threshold, max_classify_cnt, model_name, classes)
+    elif (mass_mseed_classify):
+        if (iter_pca_params == 1):
+            for ws in window_sizes:
+                    for bs in block_sizes:
+                            for to in trigger_offsets:
+                                n_cmpts          = floor(ws / bs) - 1
+                                model_name =  "SVM-Classifier(%2d)_%3d_%1d_%2d_%1d" % \
+                                              (max_stream_count, n_cmpts, bs, ws, to)
+                                mass_mseed_classification(correct_threshold, mmmeh_threshold, max_classify_cnt, model_name, classes)
+        else:
+            mass_mseed_classification(correct_threshold, mmmeh_threshold, max_classify_cnt, model_name, classes)
+
 
 class TrainingFeatures:
     window_size      = 0
@@ -300,7 +310,9 @@ def build_data_set(labeled_class_path, stream_count, tf):
         
         for t, trace in enumerate(trace_tuple):                                 # extracts window based on trigger and finds pca
             pca_wiggle = []
-            trigger_start = channel_triggers[t]
+            #trigger_start = channel_triggers[t]
+            trigger_stream = return_trigger_index(trace, useful_channels[t][1], -1)
+            trigger_start  = trigger_stream[0].data[0]
             trace_start   = trigger_start - trigger_offset
             trace_end = trace_start + window_size
 
@@ -310,10 +322,15 @@ def build_data_set(labeled_class_path, stream_count, tf):
             else:
                 last_data_pt = trace[len(trace)-1]
                 trace_window    = []
-                if (len(trace) - trace_end < 0):                                # trace window extends beyond size of total trace
+                if (len(trace) < trace_end):                                # trace window extends beyond size of total trace
                     trace_window = np.pad(trace[trace_start:len(trace)], (0, (trace_end - len(trace))),
                                           'constant', constant_values=last_data_pt)
-                    useable_stream = 0
+                # # all wiggles must be the same size when entering SVM
+                # if (len(useful_channel) < trace_end):
+                #     trace_window = np.pad(useful_channel[trace_start:len(useful_channel)],
+                #                             (0, (trace_end - len(useful_channel))),
+                #                             'constant', constant_values=last_data_pt)
+                    #useable_stream = 0
                     padding_cnt += 1
                 else:
                     trace_window = trace[trace_start:trace_end]
@@ -336,13 +353,15 @@ def build_data_set(labeled_class_path, stream_count, tf):
             #     stream_pca.extend(pca_wiggle) # continuous wiggle of all pca-ified wiggles
             # #stream_pca.concactenate(pca_wiggle)
             # #np.concatenate(np.array(list(stream_pca)), np.array(list(pca_wiggle)), axis=1)
-            stream_pca.extend(pca_wiggle) # TODO: normalize all pca's s.t. share same magnitudes?
+            stream_pca.extend(pca_wiggle) 
         if (useable_stream):
             if plot_wiggles:
                 #for stream in stream
                 #plt.plot(stream_pca)
                 plt.show()
                 plt.clf()
+                plt.cla()
+                plt.close()
             total_data.append(stream_pca)
             class_label = st[len(st) - 1].data[0]                                   # Class label always in last index
             class_labels.append(class_label)
@@ -384,6 +403,7 @@ def model_evaluate(X_train, X_test, y_train, y_test, classifier, training_featur
     if (show_matrix):
         try:
             #plt.show()
+            #plt.clf()
             plt.savefig(confusion_matrix_path + classifier_name)
         except Exception as e:
             print('could not save matrix [' + ']')
@@ -465,7 +485,7 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
 
     stdoutOrigin = sys.stdout
     sys.stdout = open(model_performance_path, "a+")
-    print("\n\nModel performance on [%s]" % model_path)
+    print("\n\nModel performance on [%s]\nConfident Threshold: %0.02f; mmmeh threshold: %.02f" % (model_path, correct_pred_thresh, mmmeh_threshold))
     print_classification_matrix(total_class_predictions, classes)
     print_misclassification_breakdown(total_class_misclassifications)
     sys.stdout.close()
@@ -598,6 +618,8 @@ def plot_confusion_matrix(y_true, y_pred, classes,
            ylabel='True label',
            xlabel='Predicted label')
 
+
+    plt.rc('font', size=20)          # controls default text sizes
     # Rotate the tick labels and set their alignment.
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
              rotation_mode="anchor")
@@ -662,10 +684,10 @@ def print_misclassification_breakdown(total_class_misclassifications):
 def print_classification_matrix(total_class_predictions, classes):
         print("\t   ", end="")
         for ch, channel in enumerate(useful_channels):
-            print("%6s" % channel[1].ljust(6), end=" ")
+            print("%6s" % channel[1].ljust(6), end="+")
         print("Total   Acceptability", end="\n\t  ")
         for uc in range(len(useful_channels)+1):
-            print("-----------------", end="")
+            print("-----------", end="")
         print("")
         #print("".join(["--------------" for uc in range(useful_channels+1)]))
         for cp, class_prediction in enumerate(total_class_predictions):
