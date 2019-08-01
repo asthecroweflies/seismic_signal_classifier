@@ -1,7 +1,6 @@
-# Successor to trace_training_prepare.py
 # Supports processing of an .mseed's stream to extract:
 #      n useful channels, class type, and trigger locations for each channel and stores in new stream
-
+# Given an Obspy .mseed file, 
 import glob
 import re
 import obspy
