@@ -1,6 +1,7 @@
+# Successor to trace_training_prepare.py
 # Supports processing of an .mseed's stream to extract:
 #      n useful channels, class type, and trigger locations for each channel and stores in new stream
-# Given an Obspy .mseed file, 
+
 import glob
 import re
 import obspy
@@ -43,12 +44,12 @@ labeled_data_path               = "D:\\labeled_data\\optimized_and_labeled_trigg
 error_log_path                  = "C:\\Users\\David\\Desktop\\training_error_log.txt"
 
 # Parameters to specify resulting optimized stream location
-test_pca                = 1                                                     # whether to plot pca-ified wiggles
-sequentially_load_pngs  = 1                                                     # whether to sequentially load from pngs
+test_pca                = 0                                                     # whether to plot pca-ified wiggles
+sequentially_load_pngs  = 0                                                     # whether to sequentially load from pngs
 use_agnostic_triggers   = 1                                                     # whether to use generalized trigger detection (v3 will always)
-actually_optimize_mseed = 0                                                     # for debugging purposes. . .
+actually_optimize_mseed = 0                                                     # for development purposes. . .
 
-plot_wiggles            = 1                                                  
+plot_wiggles            = 0                                                  
 trigger_verif_amt       = 20                                                    # how many plot_triggers to manually inspect
 triggers_verified       = 0         
 max_stream_count        = 5119                                                    # max .mseeds to load from class (useful model identifier)
@@ -56,7 +57,7 @@ max_stream_count        = 5119                                                  
 class_wiggles_chopped   = 0
 class_wiggles_saved     = 0
 
-#useful_channels         = [(10, 'PDB11'), (54, 'OT16'), (55, 'OT17')]
+#useful_channels         = [(2, 'PDB03'), (54, 'OT16'), (55, 'OT17')]
 useful_channels         = [(2, 'PDB03')]
 useful_channels         += [(54, 'OT16')]
 useful_channels         += [(55, 'OT17')]
@@ -73,8 +74,8 @@ def main():
     global class_wiggles_chopped 
     global class_wiggles_saved
 
-    #classes = ['ert','cassm','meq', 'cassm', 'drilling', 'ert']
-    classes = ['ert','cassm', 'meq','ert', 'meq', 'cassm', 'drilling']
+    #classes = ['meq','cassm', 'drilling', 'ert']
+    classes = ['cassm','ert','drilling','cassm','ert','meq','cassm','ert', 'ert','cassm', 'meq','ert', 'meq', 'cassm', 'drilling']
     #classes = ['drilling']
     for class_type in classes:
         print("Optimizing " + class_type.upper() + " .mseed files.")
@@ -118,8 +119,8 @@ def return_trigger_index(wiggle, channel_name, class_type):
             off = std_off
 
     trigger_data = np.zeros(1, dtype=np.int32)
-    depth_threshold = 0.05                                                   # triggers at indices sooner than this will not be used
-    trigger_index = floor(index_depth * len(trigger_indices))                  # just in case all triggers are very early
+    depth_threshold = 0.05                                                      # triggers at indices sooner than this will not be used
+    trigger_index = floor(index_depth * len(trigger_indices))                   # just in case all triggers are very early
     for trigger_pair in trigger_indices:
         if not ( (trigger_pair[0]/len(ctf)) < depth_threshold ) and (trigger_pair[0]/len(ctf) < 0.7 ): # dont return triggers too close to the edge to avoid padding
             trigger_index = trigger_pair[0]
@@ -187,7 +188,7 @@ def trace_tail_chopper(trace):
 
             if (spine_smoothness < spine_smoothness_threshold) and (tail_spikiness > tail_spikiness_threshold):
                 class_wiggles_chopped += 1
-                print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
+                #print("\ntail chopped! %.01f%% removed" % (100*(1-(tail_start/len(t)))))
                 return trace[:tail_start]
             peaks_considered += 1
     return trace                                                                # else return unaltered trace
@@ -319,19 +320,17 @@ def optimize_class(class_type):
                 t.filter('lowpass', freq=6000)
             elif 'PDB' in channel_name:
                 t.filter('lowpass', freq=3000)
-            #t.filter('highpass', freq=800)
             t.data = t.data[trace_start:]
 
-            #if plot_wiggles and 'OT' in channel_name:
-                #t.plot(type='relative', method='full', equal_scale=True, color='#ccd0ff', bgcolor='#07012b', linewidth='1.32', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
-                
+            # pre tail filtering
+            if plot_wiggles and 'OT' in channel_name:
+                #t.plot(type='relative', method='full', equal_scale=True, color='#c25b16', bgcolor='#ffffff', linewidth='1.32', dayPlot=True, number_of_ticks=8, size=(1000,400))#size=(2000,920))
+                pass
                 #nt = normalize1D(t.data)
                 #plt.plot(nt)
                 #plt.show()
 
             if 'OT' in channel_name:
-
-            #if 'OT' in channel_name and channel_name == 'cassm':
                 #print(t.stats.npts)
                 npts_b4 = t.stats.npts
                 t.data = trace_tail_chopper(t.data)
@@ -349,11 +348,7 @@ def optimize_class(class_type):
             if use_agnostic_triggers:
                 trigger_stream = return_trigger_index(t, uc[1], -1)             # use agnostic trigger detection (generalized for all classes to better reflect classifying scenario)
             else:
-                trigger_stream = return_trigger_index(t, uc[1], class_dict.get(class_type.upper())) # use true class for optimal training
-
-
-                # for t, trigger in enumerate(trigger_data):
-                #     plot_wiggle(reconstructed_wiggle)
+                trigger_stream = return_trigger_index(t, uc[1], class_dict.get(class_type.upper())) # use true class for super biased training
 
             if test_pca:
                 #--- testing pca ---
@@ -382,7 +377,7 @@ def optimize_class(class_type):
                     OT16_pcas.append(pca_wiggle)
                 elif channel_name == 'PDB11':
                     PDB11_pcas.append(pca_wiggle)
-                if plot_wiggles:
+                if test_pca:
                     plot_wiggle(pca_wiggle)
                     continue
 
@@ -400,26 +395,27 @@ def optimize_class(class_type):
             for ut in useful_traces:                                            # order of channels is imperative
                 optimized_stream.append(ut)
 
-                plt.style.use('ggplot')
-                plt.plot(ut, color="#772a05")    
+                if plot_wiggles:
+                    plt.style.use('ggplot')
+                    plt.plot(ut, color="#008c3f")    
 
-                plt.show()
-                plt.clf()
-                plt.cla()     
+                    plt.show()
+                    plt.clf()
+                    plt.cla()     
                 # if (triggers_verified < trigger_verif_amt):
                 #     #ut.plot(method='full', color='#0798a8', size=(2000,920))
                 #     #triggers_verified += 1
                 #     pass
             # # PDB03
-            optimized_stream.plot(method='full',
-                                  face_color='white',
-                                  type='relative',
-                                  grid_color='#9c9c9c',
-                                  color='#e89a00',
-                                  bg_color='#ffffff',
-                                  linewidth='1.4',
-                                  number_of_ticks='16'
-                                  )
+                    optimized_stream.plot(method='full',
+                                        face_color='white',
+                                        type='relative',
+                                        grid_color='#9c9c9c',
+                                        color='#cf8900',
+                                        bg_color='#ffffff',
+                                        linewidth='1.4',
+                                        number_of_ticks='16'
+                                        )
             # # OT16Z & OT16X
             # optimized_stream[1:3].plot(
             #                       face_color='white',
