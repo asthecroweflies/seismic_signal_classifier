@@ -30,6 +30,8 @@ from stream_optimization_labelling_v3 import return_trigger_index, trace_tail_ch
 #from fourier import do_fft, plot_fft, fft2float64
 from utc import ts2date, date2ts
 import sys
+from timeit import default_timer as timer
+
 
 '''
     SVM Classifier for Microseismic Event Identification
@@ -59,14 +61,16 @@ import sys
                        using Joblib's serialization library
 
         - classify_single_mseed
-            - calls classify_mseed(stream_path)
+            - calls classify_mseed(stream_path, model_name, do_validation)
+                - where model_name is a string of the form: model_name = "SVM-Classifier(%2d)_%3d_%1d_%2d_%1d" % (max_stream_count, n_cmpts, bs, ws, to)
+                - do_validation flag checks for .mseed's existence in a labeled PNG directory (set to 0 in realtime_processing)
 
         - mass_mseed_classify (specify correct & "mmmeh" thresholds and max .mseeds from each class to classify)
             - calls mass_mseed_classification
                 1) Loads .mseeds from *class*_validation directory
                 2) Extracts timestamp from these .mseeds and locates corresponding raw .mseed
                 3) Evaluates single .mseed prediction via:
-                    a) svm_classify_stream(st, model_path, class_type=-1)
+                    a) svm_classify_stream
                         i) process_stream_to_pca -> data_to_predict
                             1) performs pca on each useful_channel of a given stream and returns single conjoined trace
                         ii) svm_predict(data_to_predict) -> returns list of 2-element tuples containing class label and probability 
@@ -75,10 +79,10 @@ import sys
                         ii) else if ^ is greater than "mmmeh" threshold increment 1st index of mseed_pred[]
                         iii) otherwise increment 2nd index of mseed_pred (misclassified)
                 4) Tally all mseed predictions for a given class and:
-                    a) output matrix containing sum of that class' mseed_pred[] scores
+                    a) output matrix containing sum of that class' mseed_pred[] scores (total & acceptability score from 0th & 1st elements)
                     b) output matrix deconstructing the breakdown of the misclassified .mseeds for a particular class
 '''
-
+labeled_png_path        = "D:\\labeled_data\\png\\"
 labeled_data_path       = "D:\\labeled_data\\optimized_and_labeled_triggers\\"
 classifier_location     = "C:\\Users\\David\\Documents\\SVM\\models\\"
 unlabeled_triggers_path = "D:\\trigger\\"
@@ -89,10 +93,8 @@ grid_search_params_path = 'C:\\Users\\David\\Documents\\SVM\\svm_grid_search\\sv
 confusion_matrix_path   = 'C:\\Users\David\\Documents\\SVM\\SVM_confusion_matrices\\'
 
 class_dict              = {'MEQ' : 0, 'CASSM' : 1, 'DRILLING' : 2, 'ERT' : 3}
-# useful_channels         = [(2, 'PDB03'), (10, 'PDB11'), (54, 'OT16')]                              # Order of channels must match that used stream_optimization_labelling (10, 54, . .)
-# useful_channels         = [(2, 'PDB03'), (54, 'OT16'), (55, 'OT17')]
+
 useful_channels         = [(2, 'PDB03')]
-#useful_channels         += [(10, 'PDB11')] # TODO: optimize general trigger detection for PDB?
 useful_channels         += [(54, 'OT16Z')]
 useful_channels         += [(55, 'OT16X')]
 max_stream_count        = 3327                                                  # max streams to consider for training
@@ -115,11 +117,11 @@ def main():
     n_cmpts          = floor(window_size / block_size) - 1
 
     # Grid search for PCA params
-    window_sizes     = [800, 900, 1100, 1200, 1300, 1700]
+    window_sizes     = [1500, 1700, 1900]
     block_sizes      = [2]
-    trigger_offsets  = [50, 100,200,300]
+    trigger_offsets  = [200, 300, 400]
 
-    do_train                = 1
+    do_train                = 0
     do_svm_grid_search      = 0
     iter_pca_params         = 0
     classify_single_mseed   = 0
@@ -127,13 +129,13 @@ def main():
     
     # Mass .mseed classification params
     correct_threshold       = 0.70                                              # predictions above this are considered confidently correct
-    mmmeh_threshold         = 0.5                                              # predictions below ^ and above this are ostensibly correct               
+    mmmeh_threshold         = 0.51                                              # predictions below ^ and above this are ostensibly correct               
     max_classify_cnt        = 3327                                              # max. amt. of .mseeds to classify per class (subject to avail.)
 
     model_name = "SVM-Classifier(%2d)_%3d_%1d_%2d_%1d" % \
                  (max_stream_count, n_cmpts, block_size, window_size, trigger_offset)
 
-    classes = ['meq', 'cassm', 'ert', 'drilling']
+    classes = ['ert','meq', 'cassm', 'drilling']
     #model_path = "{0}{1}-{2}".format(classifier_location, channel_name, model_name)
 
     if (do_train):
@@ -163,11 +165,12 @@ def main():
     elif classify_single_mseed:
         #stream_path = "D:\\trigger\\1543378742.86.mseed"                # CASSM
         #stream_path = "D:\\trigger\\1544197621.54.mseed"               # Drilling
-        #stream_path = "D:\\trigger\\1544136427.33.mseed"               # MEQ
+        stream_path = "D:\\trigger\\1544136427.33.mseed"               # MEQ
         #stream_path = "D:\\trigger\\1543366796.60.mseed"               # ERT
-        stream_path = "D:\\trigger\\1544203603.19.mseed"
-        stream_path = "D:\\trigger\\1543365081.20.mseed"
-        classify_mseed(stream_path, model_name)
+        #stream_path = "D:\\trigger\\1544203603.19.mseed"
+        #stream_path = "D:\\trigger\\1543365081.20.mseed"
+        classify_mseed(stream_path, model_name, do_validation=1)
+
 
     # Iterates through each useful channel for every class and prints respective model score
     elif (mass_mseed_classify):
@@ -317,7 +320,7 @@ def build_data_set(labeled_class_path, stream_count, tf):
             trace_end = trace_start + window_size
 
             if (trace_start <= 0):
-                useable_stream = 0                                              # trigger is too early, remove to prevent bias
+                useable_stream = 0                                              # trigger is too early, window is likely erroneous
                 trace_start = 0                                                             
             else:
                 last_data_pt = trace[len(trace)-1]
@@ -325,11 +328,6 @@ def build_data_set(labeled_class_path, stream_count, tf):
                 if (len(trace) < trace_end):                                # trace window extends beyond size of total trace
                     trace_window = np.pad(trace[trace_start:len(trace)], (0, (trace_end - len(trace))),
                                           'constant', constant_values=last_data_pt)
-                # # all wiggles must be the same size when entering SVM
-                # if (len(useful_channel) < trace_end):
-                #     trace_window = np.pad(useful_channel[trace_start:len(useful_channel)],
-                #                             (0, (trace_end - len(useful_channel))),
-                #                             'constant', constant_values=last_data_pt)
                     #useable_stream = 0
                     padding_cnt += 1
                 else:
@@ -342,22 +340,13 @@ def build_data_set(labeled_class_path, stream_count, tf):
                 plots_shown += 1
                 print("have %d wiggles plotted" % plots_shown)
             
-            # #stream_pca.append(pca_wiggle)
-            # if len(stream_pca) > 0: # already have trace there, extend starting at the end
-            #     shifted_pca_wiggle = []
-            #     last_x_value       = stream_pca[len(stream_pca)-1][0]
-            #     #for e in pca_wiggle:
-            #     #    shifted_pca_wiggle =  (e[0] + last_x_value, e[1])
-            #     stream_pca.extend(pca_wiggle)
-            # else:
-            #     stream_pca.extend(pca_wiggle) # continuous wiggle of all pca-ified wiggles
-            # #stream_pca.concactenate(pca_wiggle)
-            # #np.concatenate(np.array(list(stream_pca)), np.array(list(pca_wiggle)), axis=1)
+            # conjoin pca's of each channel
             stream_pca.extend(pca_wiggle) 
+
         if (useable_stream):
             if plot_wiggles:
                 #for stream in stream
-                #plt.plot(stream_pca)
+                plt.plot(stream_pca)
                 plt.show()
                 plt.clf()
                 plt.cla()
@@ -434,15 +423,14 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
     
     total_class_predictions        = np.zeros(shape=(len(classes),  3))                             # Performance of all classes correct, maybe correct, misclassified count
     total_class_misclassifications = np.zeros(shape=(len(classes), len(classes)))                   # Distribution of misclassified .mseeds for each class
+    model_path = "{0}{1}".format(classifier_location, model_name)
+    model = joblib.load(model_path)
 
     for class_index, class_type in enumerate(classes):
-            skipped_mseeds                   = 0
-
-            class_misclassifications = np.zeros(len(classes))
-            #class_predictions        = np.zeros(shape=(len(classes), 3))
-            optimized_mseed_class_path = labeled_data_path
-            #D:\labeled_data\optimized_and_labeled_triggers\validation_mseeds\ert_testing
-            optimized_mseed_class_path += "validation_mseeds\\" + class_type + "_testing\\*.mseed"
+            skipped_mseeds              = 0
+            class_misclassifications    = np.zeros(len(classes))
+            optimized_mseed_class_path  = labeled_data_path
+            optimized_mseed_class_path  += "validation_mseeds\\" + class_type + "_testing\\*.mseed"
             
             if sequentially_load_pngs:
                 all_class_mseeds = sorted(glob.glob(optimized_mseed_class_path))
@@ -457,7 +445,6 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
                 timestamp = re.search('[0-9]+(\.[0-9][0-9]?)?', all_class_mseeds[mseed]).group(0)   # extracts timestamp from file name
                 mseed_pred          = np.zeros(3, dtype=np.int32)                                   # single mseed prediction result [correct, maybe correct, misclassified count]
                 which_wrong_class   = np.zeros(shape=(len(classes)))                                # specifies which was the wrong class prediction
-                model_path = "{0}{1}".format(classifier_location, model_name)
                 unlabeled_mseed_path = unlabeled_triggers_path + timestamp + ".mseed"
                 try:
                         st = read(unlabeled_mseed_path)
@@ -466,7 +453,7 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
                         #print("Could not read stream at " + str(unlabeled_mseed_path) + "[" + str(e) + "]")
                         continue
 
-                predictions = svm_classify_stream(st, model_path, class_type=-1)
+                predictions = svm_classify_stream(st, model, model_name, class_type=-1)
 
                 if (predictions[0][0] == class_type.upper()) and \
                     (float(predictions[0][1]) > correct_pred_thresh):           # Confident & correct prediction
@@ -479,10 +466,10 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
                     mseed_pred[2] += 1
                     class_key = class_dict.get(predictions[0][0])
                     class_misclassifications[class_key] += 1
-                total_class_predictions[class_index]        += mseed_pred
+                total_class_predictions[class_index] += mseed_pred
             total_class_misclassifications[class_index] = class_misclassifications
 
-
+    # hacky way to easily save console output to text file across multiple functions
     stdoutOrigin = sys.stdout
     sys.stdout = open(model_performance_path, "a+")
     print("\n\nModel performance on [%s]\nConfident Threshold: %0.02f; mmmeh threshold: %.02f" % (model_path, correct_pred_thresh, mmmeh_threshold))
@@ -492,9 +479,8 @@ def mass_mseed_classification(correct_pred_thresh, mmmeh_threshold, max_classify
     sys.stdout = stdoutOrigin
 
 # Given a stream, return list of tuples with probabilities for each class
-def svm_classify_stream(stream, best_classifier_location, class_type):
-        model            = joblib.load(best_classifier_location)
-        pca_n_components, pca_block_size, window_size, trigger_offset = load_params(best_classifier_location)
+def svm_classify_stream(stream, model, model_name, class_type):
+        pca_n_components, pca_block_size, window_size, trigger_offset = load_params(model_name)
         tf               = TrainingFeatures(window_size, trigger_offset, pca_block_size)
 
         data_to_predict  = process_stream_to_pca(stream, tf, class_type)
@@ -512,7 +498,7 @@ def load_params(classifier_location):
         return int(pca_params[1]), int(pca_params[2]), int(pca_params[3]), int(pca_params[4])
 
 # Given a stream, TrainingFeatures object, and the indices of useful_channels,
-# return a 1D list with extended len(useful_channels) conjoined & pca-ified wiggles
+# return a 1D list with extended len(useful_channels) conjoined of pca-ified wiggles
 def process_stream_to_pca(stream, tf, class_type):
     multi_channel_pca_wiggle = []
 
@@ -520,16 +506,17 @@ def process_stream_to_pca(stream, tf, class_type):
         channel_name = uc[1]
         window_size, trigger_offset, block_size, pca_n_components = tf.return_features()
 
-        #### Important: this trace preprocessing must be replicated as in stream_optimization_labelling.py
+        ## ! ##
+        ## ! ## Important: this trace preprocessing must be replicated as in stream_optimization_labelling.py
+        ## ! ##
         useful_channel  = stream[uc[0]].copy()
-        #useful_channel.filter('lowpass', freq=8000)
         if 'OT' in channel_name:
             useful_channel.filter('lowpass', freq=6000)
         elif 'PDB' in channel_name:
             useful_channel.filter('lowpass', freq=3000)
+
         trace_start = 300
         useful_channel.data = useful_channel.data[trace_start:]
-        # TODO: see how performance affected chopping only when CASSM?
         useful_channel.data = trace_tail_chopper(useful_channel.data)
 
         trigger_stream  = return_trigger_index(useful_channel, channel_name, class_type)
@@ -550,20 +537,14 @@ def process_stream_to_pca(stream, tf, class_type):
 
         pca, pca_wiggle, reconstructed_wiggle = pca_reduce(trace_window, pca_n_components, block_size)
 
-       # if (plot_wiggles):
-            #plot_wiggle(pca_wiggle)
-            #plot_wiggle(reconstructed_wiggle)
-
         multi_channel_pca_wiggle.extend(pca_wiggle.flatten())
-    #if (plot_wiggles):
-        #plt.plot(multi_channel_pca_wiggle, color="#fcab42")
-        #plt.show()
     multi_channel_pca_wiggle = np.array(multi_channel_pca_wiggle).reshape(1, -1)
+
     return multi_channel_pca_wiggle
 
 # Given a 1D list of pca-ified wiggle(s), unleash provided model on data
 def svm_predict(data_to_predict, model):
-    data_predictions = model.predict_proba(data_to_predict)                 # magic function to return prediction probabilities of supplied model on data
+    data_predictions = model.predict_proba(data_to_predict)                     # magic function to return prediction probabilities of supplied model on data
     predictions      = []
     class_prediction = []
 
@@ -571,7 +552,7 @@ def svm_predict(data_to_predict, model):
             class_prediction = (key, '%0.04f' % data_predictions[0][value])
             predictions.append(class_prediction)
 
-    return sorted(predictions,key=lambda x: x[1], reverse=True)             # return class probabilities in descending order
+    return sorted(predictions,key=lambda x: x[1], reverse=True)                 # return class probabilities in descending order
 
 # Given an .mseed timestamp and its class, check to see whether this .mseed 
 # exists in a directory (likely one used for training) to classify on novel data
@@ -581,6 +562,7 @@ def check_mseed_existence(timestamp, mseed_dir):
         if mseed_png_name in mseeds:
             return 1
     return 0
+
 # from: https://tinyurl.com/yawodqj5
 def plot_confusion_matrix(y_true, y_pred, classes,
                           normalize=False,
@@ -658,6 +640,63 @@ def transform3Dto2D(np_array_3D):
                 array_2D.append(new_row)
         return np.array(array_2D).tolist()
 
+# Given a path to a Stream and the model_name, find the .mseed's probability prediction breakdown across classes
+def classify_mseed(stream_path, model_name, do_validation):
+    st = read(stream_path)
+    
+    if plot_wiggles:
+        st[2:50].plot(equal_scale=False)
+
+    if (plot_wiggles):
+        for uc in useful_channels:
+            st[uc[0]].plot(method='full')
+
+    model_path = "{0}{1}".format(classifier_location, model_name)
+    model = joblib.load(model_path)
+    # Prediction returns a 4x(2x1) list containing each class type and
+    # the probability of its correct classification
+    
+    start_time = timer()
+    predictions = svm_classify_stream(st, model, model_name, class_type=-1)
+    end_time = timer()
+    print("Single .mseed classification took %0.05fs" % (end_time - start_time))
+    timestamp = re.search('[0-9]+(\.[0-9][0-9]?)?', stream_path).group(0)
+
+    if do_validation:
+        if is_correct_prediction(timestamp, predictions[0][0]):                     # Validates prediction
+            print("\n (!) Correctly predicted as %s" % predictions[0][0])
+        else:
+            actual_class_type = find_mseed_class(timestamp)
+            print("A misclassification! %s.mseed is actually %s" % (timestamp, actual_class_type.upper()))
+
+    for prediction in predictions:
+        print("%-8s %0.03f%%" % (prediction[0], float(prediction[1])*100), end="\n")
+
+
+# Given the name of an unlabeled .mseed and its prediction, return whether .mseed exists in predicted class' png folder
+# e.g. ('1543365023.20', 1) -> 1    
+def is_correct_prediction(mseed_name, class_prediction):
+    labeled_png_path = labeled_png_path + class_prediction
+    for root, dirs, files in os.walk(labeled_png_path):
+        mseed_png_name = mseed_name + ".png"
+        if mseed_png_name in files:
+            return 1
+    return 0
+
+# Given the timestamp name of an .mseed, look through all png folders and return
+# matching class
+def find_mseed_class(timestamp):
+    classes = ['meq', 'cassm', 'drilling', 'ert']
+
+    for class_type in classes:
+        labeled_png_path = labeled_png_path + class_type
+        for root, dirs, files in os.walk(labeled_png_path):
+            mseed_png_name = timestamp + ".png"
+            if mseed_png_name in files:
+                return class_type
+
+    return 'This .mseed is without a home.'
+
 # Utility function to cleanly print out misclassified distribution of a class in ascending order
 def print_misclassification_breakdown(total_class_misclassifications):
     print("\nMisclassification breakdown")
@@ -684,7 +723,7 @@ def print_misclassification_breakdown(total_class_misclassifications):
 def print_classification_matrix(total_class_predictions, classes):
         print("\t   ", end="")
         for ch, channel in enumerate(useful_channels):
-            print("%6s" % channel[1].ljust(6), end="+")
+            print("%6s" % channel[1].ljust(6), end="+ ")
         print("Total   Acceptability", end="\n\t  ")
         for uc in range(len(useful_channels)+1):
             print("-----------", end="")
@@ -724,56 +763,6 @@ def print_class_performance(class_prediction, classes):
     for cs in class_scores:
         print("%3s " % cs, end="")
     print(")", end="")
-
-# Given a path to a Stream and the model_name, find the .mseed's probability prediction breakdown across classes
-def classify_mseed(stream_path, model_name):
-    st = read(stream_path)
-    #st.plot(equal_scale=False)
-
-    if (plot_wiggles):
-        for uc in useful_channels:
-            st[uc[0]].plot(method='full')
-
-    model_path = "{0}{1}".format(classifier_location, model_name)
-
-    # Prediction returns a 4x(2x1) list containing each class type and
-    # the probability of its correct classification
-    predictions = svm_classify_stream(st, model_path, class_type=-1)
-
-    timestamp = re.search('[0-9]+(\.[0-9][0-9]?)?', stream_path).group(0)
-
-    if is_correct_prediction(timestamp, predictions[0][0]):                     # Validates prediction
-        print("\n (!) Correctly predicted as %s" % predictions[0][0])
-    else:
-        actual_class_type = find_mseed_class(timestamp)
-        print("misclassification: %s.mseed is %s" % (timestamp, actual_class_type.upper()))
-
-    for prediction in predictions:
-        print("%-8s %0.03f%%" % (prediction[0], float(prediction[1])*100), end="\n")
-
-# Given the name of an unlabeled .mseed and its prediction, return whether .mseed exists in predicted class' png folder
-# e.g. ('1543365023.20', 1) -> 1    
-def is_correct_prediction(mseed_name, class_prediction):
-    labeled_png_path = "D:\\labeled_data\\png\\" + class_prediction
-    for root, dirs, files in os.walk(labeled_png_path):
-        mseed_png_name = mseed_name + ".png"
-        if mseed_png_name in files:
-            return 1
-    return 0
-
-# Given the timestamp name of an .mseed, look through all png folders and return
-# matching class
-def find_mseed_class(timestamp):
-    classes = ['meq', 'cassm', 'drilling', 'ert']
-
-    for class_type in classes:
-        labeled_png_path = "D:\\labeled_data\\png\\" + class_type
-        for root, dirs, files in os.walk(labeled_png_path):
-            mseed_png_name = timestamp + ".png"
-            if mseed_png_name in files:
-                return class_type
-
-    return 'This .mseed is without a home.'
 
 if __name__ == '__main__':
     main()
